@@ -1,0 +1,204 @@
+#!/bin/bash
+
+load() {
+	if [ "$max" = "" ]; then
+		max=$(cat /sys/class/backlight/amdgpu_bl1/max_brightness)
+	fi
+	if [ "$sensitivity" = "" ]; then
+		sensitivity=$((max / 90))
+	fi
+	if [ "$treshold" = "" ]; then
+		treshold=$((max / 4))
+	fi
+	panOut=$((sensitivity / 4))
+	if [ "$min" = "" ]; then
+		min=0
+	fi
+	if [ "$delay" = "" ]; then
+		delay=1
+	fi
+	updated=1
+	lastSet=0
+	justeringUpp=0
+	justeringNer=0
+	if [ "$verbose" = "" ]; then
+		verbose=false
+	fi
+	if [ "$full_help" = "" ]; then
+		full_help=false
+	fi
+	need_help=false
+}
+
+usage() {
+	starts=$'\t'"${0}"
+	_starts=${starts:1}
+	silent=$'\t'"${_starts//?/ }"
+	full_silent=${silent}$'\t'
+	load
+	echo "Script usage:"
+	echo "${starts} [-h | --help]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Show help message without description."
+	fi
+	echo "${silent} [-H | --full-help]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Show this message. (${full_help})"
+	fi
+	echo "${silent} [-v | --verbose]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Enable verbose (debug) mode. (${verbose})"
+	fi
+	echo "${silent} [-M | --max <max_brightness>]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Set maximum brightness var instead of system. (${max})"
+	fi
+	echo "${silent} [-m | --min <min_brightness>]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Set minimum brightness var instead of system. (${min})"
+	fi
+	echo "${silent} [-s | --sensitivity <sensitivity>]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Set . (${sensitivity})"
+	fi
+	echo "${silent} [-t | --treshold <treshold>]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Set . (${treshold})"
+	fi
+	echo "${silent} [-d | --delay <delay>]"
+	if [ "$full_help" = true ]; then
+		echo "${full_silent}↖ Set . (${delay})"
+	fi
+	exit 0
+}
+
+options=$(getopt -l "max::,min::,sensitivity::,treshold::,delay::,verbose,help,full-help" -o "M::m::s::t::d::vhH" -- "$@")
+
+eval set -- "$options"
+
+load
+
+while true; do
+	case "$1" in
+	--max | -M)
+		shift
+		max="$1"
+		;;
+	--min | -m)
+		shift
+		min="$1"
+		;;
+	--sensitivity | -s)
+		shift
+		sensitivity="$1"
+		;;
+	--treshold | -t)
+		shift
+		treshold="$1"
+		;;
+	--delay | -d)
+		shift
+		delay="$1"
+		;;
+	--verbose | -v)
+		verbose=true
+		;;
+	--help | -h)
+		need_help=true
+		;;
+	--full-help | -H)
+		full_help=true
+		need_help=true
+		;;
+	--)
+		break
+		;;
+	esac
+	shift
+done
+
+if [ "$need_help" = true ]; then
+	usage
+fi
+
+while true; do
+	while [ "$updated" -gt 0 ]; do
+		updated=0
+		backlight=$(cat /sys/class/backlight/amdgpu_bl1/brightness)
+		sensor=$(cat /sys/bus/iio/devices/iio:device0/in_illuminance_raw)
+		if [ "$verbose" = true ]; then
+			clear
+			echo "SensorRaw: " "$sensor"
+		fi
+		if [ "$sensor" -lt 0 ]; then
+			sensor=1
+		fi
+		target=$backlight
+		if [ "$verbose" = true ]; then
+			echo "sensorMinst0: " "$sensor"
+			echo "target: " "$target" ", min: " "$min" ", max: " "$max"
+			echo "sensitivity: " "$sensitivity"
+		fi
+
+		if [[ $target -gt $lastSet && $lastSet != 0 ]]; then
+			justeringUpp=$((target - lastSet))
+			justeringNer=0
+		else
+			if [[ $target -lt $lastSet && $lastSet != 0 ]]; then
+				justeringNer=$((lastSet - target))
+				justeringUpp=0
+			else
+				justeringNer=0
+				justeringUpp=0
+			fi
+		fi
+		if [ "$verbose" = true ]; then
+			echo "justeringNer: " "$justeringNer"
+			echo "justeringUpp: " "$justeringUpp"
+		fi
+		if [ "$sensor" -lt "$treshold" ]; then
+			sensor=$(((sensor * panOut) + min))
+		fi
+
+		if [ "$sensor" -gt $((backlight + sensitivity)) ]; then
+			updated=1
+			target=$((target + (sensitivity / 2) + justeringUpp - justeringNer))
+			if [ "$verbose" = true ]; then
+				echo "Steg: sensorGreater"
+			fi
+		fi
+
+		if [ "$sensor" -lt $((backlight - sensitivity)) ]; then
+			updated=1
+			target=$((target - (sensitivity / 2) + justeringUpp - justeringNer))
+			if [ "$verbose" = true ]; then
+				echo "Steg: sensorLess"
+			fi
+		fi
+
+		if [ "$target" -gt "$max" ]; then
+			target=$max
+			if [ "$verbose" = true ]; then
+				echo "Stoppad till: targetMax"
+			fi
+		fi
+
+		if [ "$target" -lt 1 ]; then
+			target=$((min + justeringUpp - justeringNer))
+			if [ "$verbose" = true ]; then
+				echo "Stoppad till: targetMin"
+			fi
+		fi
+
+		if [ "$updated" -gt 0 ]; then
+			echo "$target" >/sys/class/backlight/amdgpu_bl1/brightness
+			lastSet=$target
+			if [ "$verbose" = true ]; then
+				echo "lastSet: " "$lastSet"
+			fi
+		fi
+		sleep "$delay"
+		updated=1
+	done
+
+done
